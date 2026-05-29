@@ -26,6 +26,20 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.4.16",
+    date: "2026-05-29",
+    highlights: {
+      en: [
+        "Improved knowledge graph performance for large projects with worker-based layout and lighter rendering updates.",
+        "Fixed graph search rendering errors and stabilized graph controls during filtering and search.",
+      ],
+      zh: [
+        "优化大型项目的知识图谱性能，使用后台布局计算并减少渲染更新开销。",
+        "修复图谱搜索时的渲染报错，并提升筛选和搜索过程中的图谱稳定性。",
+      ],
+    },
+  },
+  {
     version: "0.4.15",
     date: "2026-05-28",
     highlights: {
