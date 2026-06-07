@@ -139,7 +139,13 @@
     "useAnyTxtSearch": "AnyTXT search",
     "enableAnyTxtInSettings": "Enable AnyTXT in Settings → External Information Sources",
     "sendMessage": "Send message",
-    "stopGeneration": "Stop generation"
+    "stopGeneration": "Stop generation",
+    "attachImage": "Attach image",
+    "removeImage": "Remove image",
+    "imageMessage": "Image",
+    "imageTooLarge": "Image too large (max {{max}}MB): {{name}}",
+    "tooManyImages": "Too many images (max {{max}})",
+    "unsupportedImageType": "Unsupported image type: {{type}}"
   },
   "search": {
     "title": "Search",

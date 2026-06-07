@@ -20,7 +20,9 @@ import { convertLatexToUnicode } from "@/lib/latex-to-unicode"
 import { normalizePath, getFileName } from "@/lib/path-utils"
 import { makeQueryFileName } from "@/lib/wiki-filename"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
+import { messageImageToDataUrl } from "@/lib/chat-image-utils"
 import { resolveMarkdownImageSrc } from "@/lib/markdown-image-resolver"
+import { transformImageEmbeds } from "@/lib/wikilink-transform"
 import { findRawSourceForImage, imageUrlToAbsolute } from "@/lib/raw-source-resolver"
 import { detectLanguage } from "@/lib/detect-language"
 import { getHtmlLang, getTextDirection } from "@/lib/language-metadata"
@@ -90,19 +92,34 @@ function ChatMessageImpl({ message, isLastAssistant, onRegenerate }: ChatMessage
         {isUser ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4" />}
       </div>
       <div className="max-w-[80%] flex flex-col gap-1.5">
-        <div
-          className={`rounded-lg px-3 py-2 text-sm ${
-            isUser
-              ? "bg-primary text-primary-foreground"
-              : "bg-muted text-foreground"
-          }`}
-        >
-          {isUser ? (
-            <p dir="auto" className="whitespace-pre-wrap break-words">{message.content}</p>
-          ) : (
-            <MarkdownContent content={message.content} />
-          )}
-        </div>
+        {isUser && message.images && message.images.length > 0 && (
+          <div className={`flex flex-wrap gap-1.5 ${isUser ? "justify-end" : ""}`}>
+            {message.images.map((img, i) => (
+              <img
+                key={i}
+                src={messageImageToDataUrl(img)}
+                alt=""
+                className="max-h-40 max-w-[180px] rounded-lg border border-border/40 object-contain"
+                loading="lazy"
+              />
+            ))}
+          </div>
+        )}
+        {(!isUser || message.content) && (
+          <div
+            className={`rounded-lg px-3 py-2 text-sm ${
+              isUser
+                ? "bg-primary text-primary-foreground"
+                : "bg-muted text-foreground"
+            }`}
+          >
+            {isUser ? (
+              <p dir="auto" className="whitespace-pre-wrap break-words">{message.content}</p>
+            ) : (
+              <MarkdownContent content={message.content} />
+            )}
+          </div>
+        )}
         {isAssistant && <CitedReferencesPanel content={message.content} savedReferences={message.references} />}
         {isAssistant && hovered && (
           <div className="flex items-center gap-1">
@@ -898,6 +915,12 @@ function ThinkingBlock({ content }: { content: string }) {
  */
 function processContent(text: string): string {
   let result = text
+
+  // Rewrite Obsidian image embeds (`![[…]]`) into standard markdown
+  // FIRST — before the `[[…]]` → wikilink conversion below, which
+  // would otherwise mangle the embed target into a broken
+  // `wikilink:` image. Same rule the wiki reader / raw preview use.
+  result = transformImageEmbeds(result)
 
   // Wrap bare \begin{...}...\end{...} blocks with $$ for remark-math
   result = result.replace(

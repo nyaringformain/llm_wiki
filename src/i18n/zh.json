@@ -139,7 +139,13 @@
     "useAnyTxtSearch": "AnyTXT 搜索",
     "enableAnyTxtInSettings": "请在设置 → 外部信息源中启用 AnyTXT",
     "sendMessage": "发送消息",
-    "stopGeneration": "停止生成"
+    "stopGeneration": "停止生成",
+    "attachImage": "添加图片",
+    "removeImage": "移除图片",
+    "imageMessage": "图片",
+    "imageTooLarge": "图片过大（最大 {{max}}MB）：{{name}}",
+    "tooManyImages": "图片数量过多（最多 {{max}} 张）",
+    "unsupportedImageType": "不支持的图片类型：{{type}}"
   },
   "search": {
     "title": "搜索",

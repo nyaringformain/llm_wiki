@@ -4,7 +4,7 @@ import { BookOpen, Plus, Trash2, MessageSquare } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ChatMessage, StreamingMessage, useSourceFiles } from "./chat-message"
 import { ChatInput, type ChatSendOptions } from "./chat-input"
-import { useChatStore, chatMessagesToLLM, type MessageReference } from "@/stores/chat-store"
+import { useChatStore, chatMessagesToLLM, type MessageReference, type MessageImage } from "@/stores/chat-store"
 import { useWikiStore } from "@/stores/wiki-store"
 import { streamChat, type ChatMessage as LLMMessage } from "@/lib/llm-client"
 import { executeIngestWrites } from "@/lib/ingest"
@@ -175,14 +175,18 @@ export function ChatPanel() {
   }, [activeMessages, streamingContent])
 
   const handleSend = useCallback(
-    async (text: string, options: ChatSendOptions = { useWebSearch: false, useAnyTxtSearch: false }) => {
+    async (
+      text: string,
+      images: MessageImage[] = [],
+      options: ChatSendOptions = { useWebSearch: false, useAnyTxtSearch: false },
+    ) => {
       // Auto-create a conversation if none is active
       let convId = useChatStore.getState().activeConversationId
       if (!convId) {
         convId = createConversation()
       }
 
-      addMessage("user", text)
+      addMessage("user", text, images)
       setStreaming(true)
 
       // Build system prompt with wiki context using graph-enhanced retrieval
@@ -444,9 +448,31 @@ export function ChatPanel() {
         const lastIdx = llmMessages.length - 1
         const last = llmMessages[lastIdx]
         if (last && last.role === "user") {
+          // The final user turn may now be either a plain string
+          // (text-only) or a ContentBlock[] (carries images). Prepend
+          // the language reminder to the textual part in both shapes —
+          // string-concat for the legacy form, and into the first text
+          // block (or a new leading text block) for the multimodal form.
+          const prefix = `[${langReminder}]\n\n`
+          let newContent: LLMMessage["content"]
+          if (typeof last.content === "string") {
+            newContent = `${prefix}${last.content}`
+          } else {
+            const blocks = [...last.content]
+            const firstTextIdx = blocks.findIndex((b) => b.type === "text")
+            if (firstTextIdx >= 0) {
+              const tb = blocks[firstTextIdx]
+              if (tb.type === "text") {
+                blocks[firstTextIdx] = { type: "text", text: `${prefix}${tb.text}` }
+              }
+            } else {
+              blocks.unshift({ type: "text", text: prefix })
+            }
+            newContent = blocks
+          }
           llmMessages = [
             ...llmMessages.slice(0, lastIdx),
-            { role: "user", content: `[${langReminder}]\n\n${last.content}` },
+            { role: "user", content: newContent },
           ]
         }
       }
@@ -529,7 +555,9 @@ export function ChatPanel() {
         messages: s.messages.filter((m) => m.id !== lastUser.id),
       }))
     }
-    handleSend(lastUserMsg.content)
+    // Re-send with the original text AND images so a regenerated turn
+    // keeps the same vision context.
+    handleSend(lastUserMsg.content, lastUserMsg.images ?? [])
   }, [isStreaming, removeLastAssistantMessage, handleSend])
 
   const handleWriteToWiki = useCallback(async () => {

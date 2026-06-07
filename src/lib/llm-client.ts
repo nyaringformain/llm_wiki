@@ -4,7 +4,7 @@ import { getProviderConfig, type RequestOverrides } from "./llm-providers"
 import { getHttpFetch, isFetchNetworkError } from "./tauri-fetch"
 import { countReasoningCharsInLine, extractReasoningTextFromLine } from "./reasoning-detector"
 
-export type { ChatMessage, RequestOverrides } from "./llm-providers"
+export type { ChatMessage, ContentBlock, RequestOverrides } from "./llm-providers"
 export { isFetchNetworkError } from "./tauri-fetch"
 
 export interface StreamCallbacks {
