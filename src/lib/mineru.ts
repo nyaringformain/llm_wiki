@@ -183,20 +183,18 @@ async function downloadAndExtractMarkdown(zipUrl: string): Promise<string> {
   const zip = await JSZip.loadAsync(buffer)
 
   // Look for .md file in the zip (MinerU typically outputs full.md or <name>.md)
-  let mdFile: JSZip.JSZipObject | null = null
-  let mdName = ""
+  const mdEntries: [string, JSZip.JSZipObject][] = []
   zip.forEach((relativePath, file) => {
-    if (!file.dir && relativePath.endsWith(".md") && !mdFile) {
-      mdFile = file
-      mdName = relativePath
+    if (!file.dir && relativePath.endsWith(".md")) {
+      mdEntries.push([relativePath, file])
     }
   })
 
-  if (!mdFile) {
+  if (mdEntries.length === 0) {
     throw new Error("No Markdown file found in MinerU result zip")
   }
 
-  return await mdFile.async("string")
+  return await mdEntries[0][1].async("string")
 }
 
 // ── Public API ──
