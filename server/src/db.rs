@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
-use sqlx::SqlitePool;
+use sqlx::{FromRow, SqlitePool};
 
 use crate::config::ServerPaths;
 
@@ -72,10 +72,99 @@ impl ConfigDb {
         })
     }
 
+    pub async fn list_projects(&self) -> anyhow::Result<Vec<ProjectRecord>> {
+        sqlx::query_as::<_, ProjectRecord>(
+            r#"
+            SELECT id, name, relative_path, source, created_at, updated_at
+            FROM project_registry
+            ORDER BY lower(name), name
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list project registry")
+    }
+
+    pub async fn project_id_exists(&self, id: &str) -> anyhow::Result<bool> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project_registry WHERE id = ?")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .context("failed to check project id")?;
+
+        Ok(count > 0)
+    }
+
+    pub async fn project_relative_path_exists(&self, relative_path: &str) -> anyhow::Result<bool> {
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM project_registry WHERE relative_path = ?")
+                .bind(relative_path)
+                .fetch_one(&self.pool)
+                .await
+                .context("failed to check project relative path")?;
+
+        Ok(count > 0)
+    }
+
+    pub async fn register_project(
+        &self,
+        project: NewProjectRecord,
+    ) -> anyhow::Result<ProjectRecord> {
+        sqlx::query(
+            r#"
+            INSERT INTO project_registry (id, name, relative_path, source)
+            VALUES (?, ?, ?, ?)
+            "#,
+        )
+        .bind(&project.id)
+        .bind(&project.name)
+        .bind(&project.relative_path)
+        .bind(&project.source)
+        .execute(&self.pool)
+        .await
+        .context("failed to register project")?;
+
+        self.project_by_id(&project.id)
+            .await?
+            .context("registered project could not be read back")
+    }
+
+    async fn project_by_id(&self, id: &str) -> anyhow::Result<Option<ProjectRecord>> {
+        sqlx::query_as::<_, ProjectRecord>(
+            r#"
+            SELECT id, name, relative_path, source, created_at, updated_at
+            FROM project_registry
+            WHERE id = ?
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to read project registry entry")
+    }
+
     #[cfg(test)]
     pub(crate) fn pool(&self) -> &SqlitePool {
         &self.pool
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct NewProjectRecord {
+    pub id: String,
+    pub name: String,
+    pub relative_path: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct ProjectRecord {
+    pub id: String,
+    pub name: String,
+    pub relative_path: String,
+    pub source: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +279,29 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(stored, paths.data_root().to_string_lossy());
+    }
+
+    #[tokio::test]
+    async fn registers_and_lists_projects() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = prepare_server_paths(&temp.path().join("data-root")).unwrap();
+        let db = ConfigDb::open(&paths).await.unwrap();
+
+        let registered = db
+            .register_project(super::NewProjectRecord {
+                id: "project-id".to_string(),
+                name: "Project Name".to_string(),
+                relative_path: "project-name".to_string(),
+                source: "created".to_string(),
+            })
+            .await
+            .unwrap();
+        let projects = db.list_projects().await.unwrap();
+
+        assert_eq!(registered.id, "project-id");
+        assert_eq!(registered.relative_path, "project-name");
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "Project Name");
     }
 
     #[cfg(unix)]

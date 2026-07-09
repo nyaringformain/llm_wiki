@@ -3,13 +3,16 @@ use std::path::PathBuf;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::{any, get};
+use axum::routing::{any, get, post};
 use axum::{Json, Router};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::config::{default_static_dir, server_paths_from_env, ServerPaths};
 use crate::db::ConfigDb;
+use crate::projects::{
+    ImportProjectResponse, ProjectResponse, ProjectService, ProjectServiceError,
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -100,6 +103,17 @@ impl AppState {
             static_assets_ready: self.static_dir.join("index.html").is_file(),
         })
     }
+
+    fn project_service(&self) -> Result<ProjectService, ProjectServiceError> {
+        let Some(paths) = self.server_paths.clone() else {
+            return Err(ProjectServiceError::SetupRequired);
+        };
+        let Some(db) = self.config_db.clone() else {
+            return Err(ProjectServiceError::SetupRequired);
+        };
+
+        Ok(ProjectService::new(paths, db))
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -131,7 +145,52 @@ struct SetupStatusResponse {
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
     ok: bool,
-    error: &'static str,
+    error: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ListProjectsResponse {
+    ok: bool,
+    projects: Vec<ProjectResponse>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectEnvelope {
+    ok: bool,
+    project: ProjectResponse,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportProjectEnvelope {
+    ok: bool,
+    project: ProjectResponse,
+    skipped_symlinks: Vec<String>,
+}
+
+impl From<ImportProjectResponse> for ImportProjectEnvelope {
+    fn from(response: ImportProjectResponse) -> Self {
+        Self {
+            ok: true,
+            project: response.project,
+            skipped_symlinks: response.skipped_symlinks,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateProjectRequest {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportProjectRequest {
+    source_path: String,
+    name: Option<String>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -142,6 +201,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/setup/status", get(setup_status))
+        .route("/api/projects", get(list_projects).post(create_project))
+        .route("/api/projects/import", post(import_project))
         .route("/api/{*path}", any(api_not_found))
         .fallback_service(static_service)
         .with_state(state)
@@ -161,14 +222,102 @@ async fn setup_status(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+async fn list_projects(State(state): State<AppState>) -> axum::response::Response {
+    let result = async {
+        let service = state.project_service()?;
+        let projects = service.list_projects().await?;
+        Ok::<_, ProjectServiceError>(ListProjectsResponse { ok: true, projects })
+    }
+    .await;
+
+    match result {
+        Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
+        Err(err) => project_error_response(err),
+    }
+}
+
+async fn create_project(
+    State(state): State<AppState>,
+    Json(request): Json<CreateProjectRequest>,
+) -> axum::response::Response {
+    let result = async {
+        let service = state.project_service()?;
+        let project = service.create_project(&request.name).await?;
+        Ok::<_, ProjectServiceError>(ProjectEnvelope { ok: true, project })
+    }
+    .await;
+
+    match result {
+        Ok(payload) => (StatusCode::CREATED, Json(payload)).into_response(),
+        Err(err) => project_error_response(err),
+    }
+}
+
+async fn import_project(
+    State(state): State<AppState>,
+    Json(request): Json<ImportProjectRequest>,
+) -> axum::response::Response {
+    let result = async {
+        let service = state.project_service()?;
+        let imported = service
+            .import_project(&request.source_path, request.name.as_deref())
+            .await?;
+        Ok::<_, ProjectServiceError>(ImportProjectEnvelope::from(imported))
+    }
+    .await;
+
+    match result {
+        Ok(payload) => (StatusCode::CREATED, Json(payload)).into_response(),
+        Err(err) => project_error_response(err),
+    }
+}
+
 async fn api_not_found() -> impl IntoResponse {
     (
         StatusCode::NOT_FOUND,
         Json(ErrorResponse {
             ok: false,
-            error: "Not found",
+            error: "Not found".to_string(),
         }),
     )
+}
+
+fn project_error_response(err: ProjectServiceError) -> axum::response::Response {
+    match err {
+        ProjectServiceError::SetupRequired => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                ok: false,
+                error: "Server setup is required before projects are available".to_string(),
+            }),
+        )
+            .into_response(),
+        ProjectServiceError::InvalidInput(message) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                ok: false,
+                error: message,
+            }),
+        )
+            .into_response(),
+        ProjectServiceError::InvalidProject(message) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                ok: false,
+                error: message,
+            }),
+        )
+            .into_response(),
+        ProjectServiceError::Conflict(message) => (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                ok: false,
+                error: message,
+            }),
+        )
+            .into_response(),
+        ProjectServiceError::Internal(err) => internal_server_error(err),
+    }
 }
 
 fn internal_server_error(err: anyhow::Error) -> axum::response::Response {
@@ -177,7 +326,7 @@ fn internal_server_error(err: anyhow::Error) -> axum::response::Response {
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(ErrorResponse {
             ok: false,
-            error: "Internal server error",
+            error: "Internal server error".to_string(),
         }),
     )
         .into_response()
@@ -195,14 +344,39 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use axum::body::to_bytes;
-    use axum::http::StatusCode;
-    use serde_json::Value;
+    use axum::body::{to_bytes, Body};
+    use axum::http::{header::CONTENT_TYPE, Method, Request, StatusCode};
+    use serde_json::{json, Value};
     use tower::ServiceExt;
 
     use super::{router, AppState};
     use crate::config::prepare_server_paths;
     use crate::db::ConfigDb;
+
+    async fn request_json(
+        state: AppState,
+        method: Method,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, String, Value) {
+        let mut builder = Request::builder().method(method).uri(uri);
+        let body = match body {
+            Some(body) => {
+                builder = builder.header(CONTENT_TYPE, "application/json");
+                Body::from(body.to_string())
+            }
+            None => Body::empty(),
+        };
+        let response = router(state)
+            .oneshot(builder.body(body).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        let payload: Value = serde_json::from_str(&body).unwrap();
+        (status, body, payload)
+    }
 
     #[tokio::test]
     async fn health_reports_setup_required_without_paths() {
@@ -334,6 +508,99 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload["ok"], false);
+    }
+
+    #[tokio::test]
+    async fn project_routes_require_configured_server() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::new(None, temp.path().join("dist"));
+        let (status, body, payload) = request_json(state, Method::GET, "/api/projects", None).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(payload["ok"], false);
+        assert!(!body.contains(temp.path().to_str().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn create_project_registers_data_root_child_without_leaking_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = prepare_server_paths(&temp.path().join("data-root")).unwrap();
+        let data_root = paths.data_root().to_string_lossy().into_owned();
+        let project_root = paths.data_root().join("my-research-project");
+        let db = ConfigDb::open(&paths).await.unwrap();
+        let state = AppState::with_config_db(Some(paths), Some(db), temp.path().join("dist"));
+
+        let (status, body, payload) = request_json(
+            state.clone(),
+            Method::POST,
+            "/api/projects",
+            Some(json!({ "name": "My Research Project" })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["project"]["name"], "My Research Project");
+        assert_eq!(payload["project"]["relativePath"], "my-research-project");
+        assert_eq!(payload["project"]["source"], "created");
+        assert!(payload["project"]["id"].as_str().unwrap().contains('-'));
+        assert!(project_root.join("schema.md").is_file());
+        assert!(project_root.join("wiki/index.md").is_file());
+        assert!(project_root.join(".llm-wiki/project.json").is_file());
+        assert!(!body.contains(&data_root));
+
+        let (status, body, payload) = request_json(state, Method::GET, "/api/projects", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["projects"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            payload["projects"][0]["relativePath"],
+            "my-research-project"
+        );
+        assert!(!body.contains(&data_root));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn import_project_copies_into_data_root_and_skips_symlinks_without_leaking_paths() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let external = temp.path().join("external-project");
+        std::fs::create_dir_all(external.join("wiki")).unwrap();
+        std::fs::write(external.join("schema.md"), "# Schema").unwrap();
+        std::fs::write(external.join("wiki/page.md"), "# Page").unwrap();
+        let outside = temp.path().join("outside.md");
+        std::fs::write(&outside, "# Outside").unwrap();
+        symlink(&outside, external.join("wiki/linked.md")).unwrap();
+
+        let paths = prepare_server_paths(&temp.path().join("data-root")).unwrap();
+        let data_root = paths.data_root().to_string_lossy().into_owned();
+        let project_root = paths.data_root().join("imported-project");
+        let db = ConfigDb::open(&paths).await.unwrap();
+        let state = AppState::with_config_db(Some(paths), Some(db), temp.path().join("dist"));
+        let source_path = external.to_string_lossy().into_owned();
+
+        let (status, body, payload) = request_json(
+            state,
+            Method::POST,
+            "/api/projects/import",
+            Some(json!({
+                "sourcePath": source_path,
+                "name": "Imported Project"
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(payload["project"]["relativePath"], "imported-project");
+        assert_eq!(payload["project"]["source"], "imported");
+        assert_eq!(payload["skippedSymlinks"], json!(["wiki/linked.md"]));
+        assert!(project_root.join("schema.md").is_file());
+        assert!(project_root.join("wiki/page.md").is_file());
+        assert!(!project_root.join("wiki/linked.md").exists());
+        assert!(project_root.join(".llm-wiki/project.json").is_file());
+        assert!(!body.contains(&data_root));
+        assert!(!body.contains(&source_path));
     }
 
     #[tokio::test]

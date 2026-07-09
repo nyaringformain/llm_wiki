@@ -778,6 +778,7 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "axum",
+ "rand",
  "serde",
  "serde_json",
  "sqlx",
