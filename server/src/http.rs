@@ -1,15 +1,20 @@
 use std::path::PathBuf;
 
-use axum::extract::State;
-use axum::http::StatusCode;
+use axum::body::Body;
+use axum::extract::{Path as AxumPath, Query, State};
+use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{any, get, post};
+use axum::routing::{any, delete, get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::config::{default_static_dir, server_paths_from_env, ServerPaths};
 use crate::db::ConfigDb;
+use crate::files::{
+    FileService, FileServiceError, FileTreeRequest, UploadFilesRequest, WriteFileRequest,
+};
 use crate::projects::{
     ImportProjectResponse, ProjectResponse, ProjectService, ProjectServiceError,
 };
@@ -114,6 +119,17 @@ impl AppState {
 
         Ok(ProjectService::new(paths, db))
     }
+
+    fn file_service(&self) -> Result<FileService, FileServiceError> {
+        let Some(paths) = self.server_paths.clone() else {
+            return Err(FileServiceError::SetupRequired);
+        };
+        let Some(db) = self.config_db.clone() else {
+            return Err(FileServiceError::SetupRequired);
+        };
+
+        Ok(FileService::new(paths, db))
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -193,6 +209,18 @@ struct ImportProjectRequest {
     name: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ProjectFilePath {
+    project_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FilePathQuery {
+    path: Option<String>,
+    expected_version: Option<String>,
+}
+
 pub fn router(state: AppState) -> Router {
     let static_dir = state.static_dir.clone();
     let static_service =
@@ -203,6 +231,18 @@ pub fn router(state: AppState) -> Router {
         .route("/api/setup/status", get(setup_status))
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/projects/import", post(import_project))
+        .route("/api/projects/{project_id}/files/tree", get(file_tree))
+        .route("/api/projects/{project_id}/files/read", get(read_file))
+        .route("/api/projects/{project_id}/files/write", put(write_file))
+        .route("/api/projects/{project_id}/files", delete(delete_file))
+        .route(
+            "/api/projects/{project_id}/files/upload",
+            post(upload_files),
+        )
+        .route(
+            "/api/projects/{project_id}/files/preview",
+            get(preview_file),
+        )
         .route("/api/{*path}", any(api_not_found))
         .fallback_service(static_service)
         .with_state(state)
@@ -272,6 +312,136 @@ async fn import_project(
     }
 }
 
+async fn file_tree(
+    State(state): State<AppState>,
+    AxumPath(path): AxumPath<ProjectFilePath>,
+    Query(request): Query<FileTreeRequest>,
+) -> axum::response::Response {
+    let result = async {
+        let service = state.file_service()?;
+        service.tree(&path.project_id, request).await
+    }
+    .await;
+
+    match result {
+        Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
+        Err(err) => file_error_response(err),
+    }
+}
+
+async fn read_file(
+    State(state): State<AppState>,
+    AxumPath(path): AxumPath<ProjectFilePath>,
+    Query(request): Query<FilePathQuery>,
+) -> axum::response::Response {
+    let result = async {
+        let service = state.file_service()?;
+        service
+            .read(&path.project_id, request.path.as_deref().unwrap_or(""))
+            .await
+    }
+    .await;
+
+    match result {
+        Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
+        Err(err) => file_error_response(err),
+    }
+}
+
+async fn write_file(
+    State(state): State<AppState>,
+    AxumPath(path): AxumPath<ProjectFilePath>,
+    Json(request): Json<WriteFileRequest>,
+) -> axum::response::Response {
+    let result = async {
+        let service = state.file_service()?;
+        service.write(&path.project_id, request).await
+    }
+    .await;
+
+    match result {
+        Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
+        Err(err) => file_error_response(err),
+    }
+}
+
+async fn delete_file(
+    State(state): State<AppState>,
+    AxumPath(path): AxumPath<ProjectFilePath>,
+    Query(request): Query<FilePathQuery>,
+) -> axum::response::Response {
+    let result = async {
+        let service = state.file_service()?;
+        service
+            .delete(
+                &path.project_id,
+                request.path.as_deref().unwrap_or(""),
+                request.expected_version.as_deref(),
+            )
+            .await
+    }
+    .await;
+
+    match result {
+        Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
+        Err(err) => file_error_response(err),
+    }
+}
+
+async fn upload_files(
+    State(state): State<AppState>,
+    AxumPath(path): AxumPath<ProjectFilePath>,
+    Json(request): Json<UploadFilesRequest>,
+) -> axum::response::Response {
+    let result = async {
+        let service = state.file_service()?;
+        service.upload(&path.project_id, request).await
+    }
+    .await;
+
+    match result {
+        Ok(payload) => (StatusCode::CREATED, Json(payload)).into_response(),
+        Err(err) => file_error_response(err),
+    }
+}
+
+async fn preview_file(
+    State(state): State<AppState>,
+    AxumPath(path): AxumPath<ProjectFilePath>,
+    Query(request): Query<FilePathQuery>,
+) -> axum::response::Response {
+    let result = async {
+        let service = state.file_service()?;
+        service
+            .preview(&path.project_id, request.path.as_deref().unwrap_or(""))
+            .await
+    }
+    .await;
+
+    match result {
+        Ok(payload) => {
+            let mut response = Body::from(payload.bytes).into_response();
+            response.headers_mut().insert(
+                CONTENT_TYPE,
+                HeaderValue::from_str(&payload.mime_type)
+                    .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+            );
+            response.headers_mut().insert(
+                CONTENT_LENGTH,
+                HeaderValue::from_str(&payload.size.to_string())
+                    .unwrap_or_else(|_| HeaderValue::from_static("0")),
+            );
+            response.headers_mut().insert(
+                "x-llm-wiki-file-version",
+                HeaderValue::from_str(&payload.version)
+                    .unwrap_or_else(|_| HeaderValue::from_static("")),
+            );
+            response
+        }
+        Err(err) => file_error_response(err),
+    }
+}
+
 async fn api_not_found() -> impl IntoResponse {
     (
         StatusCode::NOT_FOUND,
@@ -320,6 +490,76 @@ fn project_error_response(err: ProjectServiceError) -> axum::response::Response 
     }
 }
 
+fn file_error_response(err: FileServiceError) -> axum::response::Response {
+    match err {
+        FileServiceError::SetupRequired => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                ok: false,
+                error: "Server setup is required before files are available".to_string(),
+            }),
+        )
+            .into_response(),
+        FileServiceError::ProjectNotFound => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                ok: false,
+                error: "Project was not found".to_string(),
+            }),
+        )
+            .into_response(),
+        FileServiceError::InvalidInput(message) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                ok: false,
+                error: message,
+            }),
+        )
+            .into_response(),
+        FileServiceError::NotFound(message) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                ok: false,
+                error: message,
+            }),
+        )
+            .into_response(),
+        FileServiceError::Conflict(message) => (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                ok: false,
+                error: message,
+            }),
+        )
+            .into_response(),
+        FileServiceError::PreconditionRequired(message) => (
+            StatusCode::PRECONDITION_REQUIRED,
+            Json(ErrorResponse {
+                ok: false,
+                error: message,
+            }),
+        )
+            .into_response(),
+        FileServiceError::PreconditionFailed(message) => (
+            StatusCode::PRECONDITION_FAILED,
+            Json(ErrorResponse {
+                ok: false,
+                error: message,
+            }),
+        )
+            .into_response(),
+        FileServiceError::PayloadTooLarge(message) => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ErrorResponse {
+                ok: false,
+                error: message,
+            }),
+        )
+            .into_response(),
+        FileServiceError::Internal(err) => internal_server_error(err),
+    }
+}
+
 fn internal_server_error(err: anyhow::Error) -> axum::response::Response {
     tracing::error!(error = %err, "server API request failed");
     (
@@ -345,7 +585,7 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use axum::body::{to_bytes, Body};
-    use axum::http::{header::CONTENT_TYPE, Method, Request, StatusCode};
+    use axum::http::{header::CONTENT_TYPE, HeaderMap, Method, Request, StatusCode};
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
@@ -374,8 +614,58 @@ mod tests {
         let status = response.status();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
-        let payload: Value = serde_json::from_str(&body).unwrap();
+        let payload: Value = serde_json::from_str(&body).unwrap_or_else(|err| {
+            panic!("expected JSON response, status={status}, body={body:?}, error={err}")
+        });
         (status, body, payload)
+    }
+
+    async fn request_bytes(
+        state: AppState,
+        method: Method,
+        uri: &str,
+    ) -> (StatusCode, HeaderMap, Vec<u8>) {
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, headers, body.to_vec())
+    }
+
+    async fn configured_state(temp: &tempfile::TempDir) -> (AppState, crate::config::ServerPaths) {
+        let paths = prepare_server_paths(&temp.path().join("data-root")).unwrap();
+        let db = ConfigDb::open(&paths).await.unwrap();
+        let state =
+            AppState::with_config_db(Some(paths.clone()), Some(db), temp.path().join("dist"));
+        (state, paths)
+    }
+
+    async fn create_test_project(state: AppState, name: &str) -> (String, String) {
+        let (status, _body, payload) = request_json(
+            state,
+            Method::POST,
+            "/api/projects",
+            Some(json!({ "name": name })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        (
+            payload["project"]["id"].as_str().unwrap().to_string(),
+            payload["project"]["relativePath"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        )
     }
 
     #[tokio::test]
@@ -601,6 +891,242 @@ mod tests {
         assert!(project_root.join(".llm-wiki/project.json").is_file());
         assert!(!body.contains(&data_root));
         assert!(!body.contains(&source_path));
+    }
+
+    #[tokio::test]
+    async fn file_routes_write_read_tree_preview_and_trash_without_leaking_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, paths) = configured_state(&temp).await;
+        let data_root = paths.data_root().to_string_lossy().into_owned();
+        let (project_id, relative_project_path) =
+            create_test_project(state.clone(), "Files Project").await;
+        let project_root = paths.data_root().join(relative_project_path);
+
+        let write_uri = format!("/api/projects/{project_id}/files/write");
+        let (status, body, payload) = request_json(
+            state.clone(),
+            Method::PUT,
+            &write_uri,
+            Some(json!({
+                "path": "wiki/notes.md",
+                "contents": "# Notes\n"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["file"]["path"], "wiki/notes.md");
+        assert_eq!(payload["file"]["mimeType"], "text/markdown");
+        assert!(!body.contains(&data_root));
+        let version = payload["file"]["version"].as_str().unwrap().to_string();
+
+        let read_uri = format!("/api/projects/{project_id}/files/read?path=wiki/notes.md");
+        let (status, body, payload) =
+            request_json(state.clone(), Method::GET, &read_uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["contents"], "# Notes\n");
+        assert_eq!(payload["file"]["version"], version);
+        assert!(!body.contains(&data_root));
+
+        let (status, _body, payload) = request_json(
+            state.clone(),
+            Method::PUT,
+            &write_uri,
+            Some(json!({
+                "path": "wiki/notes.md",
+                "contents": "# Missing precondition\n"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PRECONDITION_REQUIRED);
+        assert_eq!(payload["ok"], false);
+
+        let (status, _body, payload) = request_json(
+            state.clone(),
+            Method::PUT,
+            &write_uri,
+            Some(json!({
+                "path": "wiki/notes.md",
+                "contents": "# Stale\n",
+                "expectedVersion": "stale"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(payload["ok"], false);
+
+        let (status, _body, payload) = request_json(
+            state.clone(),
+            Method::PUT,
+            &write_uri,
+            Some(json!({
+                "path": "wiki/notes.md",
+                "contents": "# Updated Notes\n",
+                "expectedVersion": version
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["file"]["size"], 16);
+
+        let tree_uri = format!("/api/projects/{project_id}/files/tree?path=wiki&maxDepth=1");
+        let (status, body, payload) =
+            request_json(state.clone(), Method::GET, &tree_uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let nodes = payload["nodes"].as_array().unwrap();
+        assert!(nodes.iter().any(|node| node["path"] == "wiki/notes.md"));
+        assert!(!body.contains(&data_root));
+
+        let preview_uri = format!("/api/projects/{project_id}/files/preview?path=wiki/notes.md");
+        let (status, headers, body) = request_bytes(state.clone(), Method::GET, &preview_uri).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get(CONTENT_TYPE).unwrap().to_str().unwrap(),
+            "text/markdown"
+        );
+        assert_eq!(String::from_utf8(body).unwrap(), "# Updated Notes\n");
+
+        let delete_uri = format!("/api/projects/{project_id}/files?path=wiki/notes.md");
+        let (status, body, payload) = request_json(state, Method::DELETE, &delete_uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["path"], "wiki/notes.md");
+        let trash_path = payload["trashPath"].as_str().unwrap();
+        assert!(trash_path.starts_with(".llm-wiki/trash/"));
+        assert!(!project_root.join("wiki/notes.md").exists());
+        assert!(project_root.join(trash_path).is_file());
+        assert!(!body.contains(&data_root));
+    }
+
+    #[tokio::test]
+    async fn file_routes_reject_project_relative_escape_without_leaking_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, paths) = configured_state(&temp).await;
+        let data_root = paths.data_root().to_string_lossy().into_owned();
+        let (project_id, _relative_project_path) =
+            create_test_project(state.clone(), "Escape Project").await;
+
+        let uri =
+            format!("/api/projects/{project_id}/files/read?path=../.llm-wiki-server/config.sqlite");
+        let (status, body, payload) = request_json(state, Method::GET, &uri, None).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(payload["ok"], false);
+        assert!(payload["error"]
+            .as_str()
+            .unwrap()
+            .contains("parent traversal"));
+        assert!(!body.contains(&data_root));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_routes_reject_and_report_symlinks_without_following_them() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let (state, paths) = configured_state(&temp).await;
+        let (project_id, relative_project_path) =
+            create_test_project(state.clone(), "Symlink Project").await;
+        let project_root = paths.data_root().join(relative_project_path);
+        let outside = temp.path().join("outside-secret.md");
+        std::fs::write(&outside, "# Secret").unwrap();
+        symlink(&outside, project_root.join("wiki/linked.md")).unwrap();
+
+        let read_uri = format!("/api/projects/{project_id}/files/read?path=wiki/linked.md");
+        let (status, body, payload) =
+            request_json(state.clone(), Method::GET, &read_uri, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(payload["ok"], false);
+        assert!(!body.contains(outside.to_str().unwrap()));
+
+        let tree_uri =
+            format!("/api/projects/{project_id}/files/tree?path=wiki&includeHidden=true");
+        let (status, _body, payload) =
+            request_json(state.clone(), Method::GET, &tree_uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["skippedSymlinks"], json!(["wiki/linked.md"]));
+        assert!(!payload["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["path"] == "wiki/linked.md"));
+
+        let delete_uri = format!("/api/projects/{project_id}/files?path=wiki");
+        let (status, body, payload) = request_json(state, Method::DELETE, &delete_uri, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(payload["ok"], false);
+        assert!(payload["error"]
+            .as_str()
+            .unwrap()
+            .contains("wiki/linked.md"));
+        assert!(project_root.join("wiki/linked.md").exists());
+        assert!(!body.contains(outside.to_str().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn upload_files_skip_same_hash_and_rename_different_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, paths) = configured_state(&temp).await;
+        let (project_id, relative_project_path) =
+            create_test_project(state.clone(), "Upload Project").await;
+        let project_root = paths.data_root().join(relative_project_path);
+        let upload_uri = format!("/api/projects/{project_id}/files/upload");
+
+        let (status, _body, payload) = request_json(
+            state.clone(),
+            Method::POST,
+            &upload_uri,
+            Some(json!({
+                "files": [{
+                    "fileName": "paper.txt",
+                    "contentBase64": "YWxwaGE="
+                }]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(payload["files"][0]["path"], "raw/sources/paper.txt");
+        assert_eq!(payload["files"][0]["skipped"], false);
+
+        let (status, _body, payload) = request_json(
+            state.clone(),
+            Method::POST,
+            &upload_uri,
+            Some(json!({
+                "files": [{
+                    "fileName": "paper.txt",
+                    "contentBase64": "YWxwaGE="
+                }]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(payload["files"][0]["path"], "raw/sources/paper.txt");
+        assert_eq!(payload["files"][0]["skipped"], true);
+        assert_eq!(payload["files"][0]["reason"], "same_hash");
+
+        let (status, _body, payload) = request_json(
+            state,
+            Method::POST,
+            &upload_uri,
+            Some(json!({
+                "files": [{
+                    "fileName": "paper.txt",
+                    "contentBase64": "YmV0YQ=="
+                }]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(payload["files"][0]["path"], "raw/sources/paper-1.txt");
+        assert_eq!(payload["files"][0]["skipped"], false);
+        assert_eq!(
+            std::fs::read_to_string(project_root.join("raw/sources/paper.txt")).unwrap(),
+            "alpha"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project_root.join("raw/sources/paper-1.txt")).unwrap(),
+            "beta"
+        );
     }
 
     #[tokio::test]

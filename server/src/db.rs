@@ -129,7 +129,7 @@ impl ConfigDb {
             .context("registered project could not be read back")
     }
 
-    async fn project_by_id(&self, id: &str) -> anyhow::Result<Option<ProjectRecord>> {
+    pub async fn project_by_id(&self, id: &str) -> anyhow::Result<Option<ProjectRecord>> {
         sqlx::query_as::<_, ProjectRecord>(
             r#"
             SELECT id, name, relative_path, source, created_at, updated_at
