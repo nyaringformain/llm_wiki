@@ -5,6 +5,7 @@ import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 
 const host = process.env.TAURI_DEV_HOST
+const personalServerUrl = process.env.LLM_WIKI_SERVER_URL ?? "http://127.0.0.1:19828"
 
 // Read version from package.json at config-load time so the Settings
 // UI can show the running app version without duplicating the string.
@@ -41,6 +42,12 @@ export default defineConfig(async () => ({
     watch: {
       // 3. tell vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
+    },
+    proxy: {
+      "/api": {
+        target: personalServerUrl,
+        changeOrigin: false,
+      },
     },
   },
 

@@ -16,7 +16,7 @@ import { MermaidDiagram, unwrapMermaidPre } from "@/components/mermaid-diagram"
 interface WikiReaderProps {
   body: string
   /**
-   * Absolute path of the markdown file being rendered. Used to
+   * Project-relative path of the markdown file being rendered. Used to
    * resolve relative image references against the file's own
    * directory (Obsidian-style), so e.g. `../assets/x.png` works.
    * Optional — when omitted, image paths fall back to wiki-root
@@ -52,8 +52,11 @@ export function WikiReader({ body, filePath }: WikiReaderProps) {
   const renderLanguage = detectLanguage(body)
   const direction = getTextDirection(renderLanguage)
   const htmlLang = getHtmlLang(renderLanguage)
-  const projectPath = project ? normalizePath(project.path) : null
-  const wikiRoot = projectPath ? `${projectPath}/wiki` : null
+  const projectPath = project ? normalizePath(project.relativePath ?? project.path) : null
+  // File-tree and API paths are relative to the project root in the web port.
+  // Keep wikilink resolution in that same namespace rather than prefixing the
+  // Data-Root-relative registry path used only for project display.
+  const wikiRoot = project ? "wiki" : null
   // Directory of the file being rendered (project-absolute), so
   // relative image srcs resolve against it like Obsidian does.
   const currentFileDir = useMemo(() => {

@@ -1,35 +1,28 @@
 /**
- * Search ranking scenarios moved to Rust with the shared backend search
- * service (`src-tauri/src/commands/search.rs`). The WebView now only
- * wraps that command, so this file guards the command contract from
- * the TS side instead of duplicating ranking logic in Node.
+ * Search ranking lives in the Rust Personal Server. The browser only wraps
+ * that authenticated API, so this file guards the HTTP-facing contract from
+ * the TypeScript side instead of duplicating ranking logic in Node.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { useWikiStore } from "@/stores/wiki-store"
 
-const mockInvoke = vi.fn()
+const mockSearch = vi.fn()
 
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: (...args: unknown[]) => mockInvoke(...args),
+vi.mock("@/platform/web-api", () => ({
+  webApi: { search: (...args: unknown[]) => mockSearch(...args) },
 }))
 
 import { searchWiki } from "./search"
 
 beforeEach(() => {
-  mockInvoke.mockReset()
-  useWikiStore.getState().setEmbeddingConfig({
-    enabled: false,
-    endpoint: "",
-    apiKey: "",
-    model: "",
-  })
+  mockSearch.mockReset()
 })
 
 describe("searchWiki backend command contract", () => {
-  it("delegates ranking to search_project and maps relative wiki paths to absolute paths", async () => {
-    mockInvoke.mockResolvedValueOnce({
+  it("delegates ranking to the project-scoped search API and preserves relative paths", async () => {
+    mockSearch.mockResolvedValueOnce({
       mode: "keyword",
       tokenHits: 1,
+      graphHits: 0,
       vectorHits: 0,
       results: [
         {
@@ -43,16 +36,13 @@ describe("searchWiki backend command contract", () => {
       ],
     })
 
-    const results = await searchWiki("/tmp/project", "attention")
+    const results = await searchWiki("project-id", "attention")
 
-    expect(mockInvoke).toHaveBeenCalledWith("search_project", {
-      projectPath: "/tmp/project",
-      query: "attention",
+    expect(mockSearch).toHaveBeenCalledWith("project-id", "attention", {
       topK: 20,
       includeContent: false,
-      queryEmbedding: null,
-      embeddingConfig: expect.objectContaining({ enabled: false }),
+      expandGraph: true,
     })
-    expect(results[0].path).toBe("/tmp/project/wiki/concepts/attention.md")
+    expect(results[0].path).toBe("wiki/concepts/attention.md")
   })
 })
