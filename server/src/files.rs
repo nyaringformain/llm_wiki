@@ -227,7 +227,7 @@ impl FileService {
         })
     }
 
-    async fn project_root(&self, project_id: &str) -> Result<PathBuf, FileServiceError> {
+    pub(crate) async fn project_root(&self, project_id: &str) -> Result<PathBuf, FileServiceError> {
         let record = self
             .db
             .project_by_id(project_id)

@@ -6,20 +6,26 @@ description = "LLM Wiki Personal Server"
 
 [dependencies]
 anyhow = "1"
+argon2 = "0.5"
+arrow-array = "57"
 axum = "0.8"
 base64 = "0.22"
+futures = "0.3"
 hex = "0.4"
+lancedb = "0.27.2"
 mime_guess = "2"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower-http = { version = "0.6", features = ["fs", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+walkdir = "2"
 
 [dev-dependencies]
+arrow-schema = "57"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

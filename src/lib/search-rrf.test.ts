@@ -1,35 +1,28 @@
 /**
- * The RRF scoring implementation now lives in Rust
- * (`commands::search`). These TS tests only guard the WebView wrapper:
- * it should pass embedding config to the shared backend command and map
- * backend-relative result paths back to absolute project paths for the editor.
+ * The RRF scoring implementation lives in the Personal Server. These tests
+ * guard the browser wrapper: it addresses a registered project, requests graph
+ * expansion, and keeps result paths relative to that project.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { useWikiStore } from "@/stores/wiki-store"
 
-const mockInvoke = vi.fn()
+const mockSearch = vi.fn()
 
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: (...args: unknown[]) => mockInvoke(...args),
+vi.mock("@/platform/web-api", () => ({
+  webApi: { search: (...args: unknown[]) => mockSearch(...args) },
 }))
 
 import { searchWiki, tokenizeQuery } from "./search"
 
 beforeEach(() => {
-  mockInvoke.mockReset()
-  useWikiStore.getState().setEmbeddingConfig({
-    enabled: true,
-    endpoint: "http://test/v1/embeddings",
-    apiKey: "",
-    model: "test-embed",
-  })
+  mockSearch.mockReset()
 })
 
 describe("searchWiki backend wrapper", () => {
-  it("passes embeddingConfig to the shared backend search command and absolutizes paths", async () => {
-    mockInvoke.mockResolvedValueOnce({
+  it("uses server-side graph expansion and leaves paths project-relative", async () => {
+    mockSearch.mockResolvedValueOnce({
       mode: "hybrid",
       tokenHits: 1,
+      graphHits: 0,
       vectorHits: 1,
       results: [
         {
@@ -43,41 +36,31 @@ describe("searchWiki backend wrapper", () => {
       ],
     })
 
-    const out = await searchWiki("/tmp/project", "attention")
+    const out = await searchWiki("project-id", "attention")
 
-    expect(mockInvoke).toHaveBeenCalledWith("search_project", {
-      projectPath: "/tmp/project",
-      query: "attention",
+    expect(mockSearch).toHaveBeenCalledWith("project-id", "attention", {
       topK: 20,
       includeContent: false,
-      queryEmbedding: null,
-      embeddingConfig: expect.objectContaining({ enabled: true, model: "test-embed" }),
+      expandGraph: true,
     })
-    expect(out[0].path).toBe("/tmp/project/wiki/concepts/attention.md")
+    expect(out[0].path).toBe("wiki/concepts/attention.md")
   })
 
-  it("passes disabled embedding config through for backend keyword-only search", async () => {
-    useWikiStore.getState().setEmbeddingConfig({
-      enabled: false,
-      endpoint: "",
-      apiKey: "",
-      model: "",
-    })
-    mockInvoke.mockResolvedValueOnce({
+  it("requests keyword search without browser-side embedding credentials", async () => {
+    mockSearch.mockResolvedValueOnce({
       mode: "keyword",
       tokenHits: 1,
+      graphHits: 0,
       vectorHits: 0,
       results: [],
     })
 
-    await searchWiki("/tmp/project", "attention")
+    await searchWiki("project-id", "attention")
 
-    expect(mockInvoke).toHaveBeenCalledWith(
-      "search_project",
-      expect.objectContaining({
-        queryEmbedding: null,
-        embeddingConfig: expect.objectContaining({ enabled: false }),
-      }),
+    expect(mockSearch).toHaveBeenCalledWith(
+      "project-id",
+      "attention",
+      expect.not.objectContaining({ queryEmbedding: expect.anything() }),
     )
   })
 

@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef } from "react"
-import { convertFileSrc } from "@tauri-apps/api/core"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import remarkMath from "remark-math"
@@ -17,7 +16,6 @@ import {
   getFileCategory,
   getCodeLanguage,
   getFileExtension,
-  isExtractedTextPreviewFile,
 } from "@/lib/file-types"
 import type { FileCategory } from "@/lib/file-types"
 import { getFileName, normalizePath } from "@/lib/path-utils"
@@ -29,32 +27,48 @@ import { parseFrontmatter } from "@/lib/frontmatter"
 import { FrontmatterPanel } from "@/components/editor/frontmatter-panel"
 import { useWikiStore } from "@/stores/wiki-store"
 import { MermaidDiagram, unwrapMermaidPre } from "@/components/mermaid-diagram"
+import { webApi } from "@/platform/web-api"
 
 interface FilePreviewProps {
+  projectId?: string
   filePath: string
   textContent: string
 }
 
-export function FilePreview({ filePath, textContent }: FilePreviewProps) {
+export function FilePreview({ projectId, filePath, textContent }: FilePreviewProps) {
   const category = getFileCategory(filePath)
   const fileName = getFileName(filePath)
   const extension = getFileExtension(filePath)
+  const activeProjectId = useWikiStore((state) => state.project?.id)
+  const previewProjectId = projectId ?? activeProjectId
 
   switch (category) {
     case "image":
-      return <ImagePreview filePath={filePath} fileName={fileName} />
+      return previewProjectId
+        ? <ImagePreview projectId={previewProjectId} filePath={filePath} fileName={fileName} />
+        : <BinaryPlaceholder filePath={filePath} fileName={fileName} category={category} />
     case "video":
-      return <VideoPreview filePath={filePath} fileName={fileName} />
+      return previewProjectId
+        ? <VideoPreview projectId={previewProjectId} filePath={filePath} fileName={fileName} />
+        : <BinaryPlaceholder filePath={filePath} fileName={fileName} category={category} />
     case "audio":
-      return <AudioPreview filePath={filePath} fileName={fileName} />
+      return previewProjectId
+        ? <AudioPreview projectId={previewProjectId} filePath={filePath} fileName={fileName} />
+        : <BinaryPlaceholder filePath={filePath} fileName={fileName} category={category} />
     case "pdf":
-      return <TextPreview filePath={filePath} content={textContent} label="PDF (extracted text)" />
+      return previewProjectId
+        ? <PdfPreview projectId={previewProjectId} filePath={filePath} fileName={fileName} />
+        : <BinaryPlaceholder filePath={filePath} fileName={fileName} category={category} />
     case "code":
       if (extension === "svg" && isAgentWorkspacePath(filePath)) {
-        return <ImagePreview filePath={filePath} fileName={fileName} />
+        return previewProjectId
+          ? <ImagePreview projectId={previewProjectId} filePath={filePath} fileName={fileName} />
+          : <BinaryPlaceholder filePath={filePath} fileName={fileName} category={category} />
       }
       if (extension === "html" || extension === "htm") {
-        return <HtmlPreview filePath={filePath} fileName={fileName} />
+        return previewProjectId
+          ? <HtmlPreview projectId={previewProjectId} filePath={filePath} fileName={fileName} />
+          : <BinaryPlaceholder filePath={filePath} fileName={fileName} category={category} />
       }
       return <CodePreview filePath={filePath} content={textContent} />
     case "data":
@@ -62,17 +76,14 @@ export function FilePreview({ filePath, textContent }: FilePreviewProps) {
     case "text":
       return <TextPreview filePath={filePath} content={textContent} label="Text" />
     case "document":
-      if (isExtractedTextPreviewFile(filePath)) {
-        return <TextPreview filePath={filePath} content={textContent} label={extractedTextLabel(filePath)} />
-      }
       return <BinaryPlaceholder filePath={filePath} fileName={fileName} category={category} />
     default:
       return <BinaryPlaceholder filePath={filePath} fileName={fileName} category={category} />
   }
 }
 
-function HtmlPreview({ filePath, fileName }: { filePath: string; fileName: string }) {
-  const src = convertFileSrc(filePath)
+function HtmlPreview({ projectId, filePath, fileName }: { projectId: string; filePath: string; fileName: string }) {
+  const src = webApi.previewUrl(projectId, filePath)
   return (
     <div className="flex h-full flex-col p-4">
       <div className="mb-3 flex items-center gap-2 text-xs text-muted-foreground">
@@ -84,7 +95,7 @@ function HtmlPreview({ filePath, fileName }: { filePath: string; fileName: strin
           title={fileName}
           src={src}
           className="h-full w-full bg-white"
-          sandbox="allow-scripts"
+          sandbox=""
         />
       </div>
     </div>
@@ -95,28 +106,8 @@ function isAgentWorkspacePath(filePath: string): boolean {
   return normalizePath(filePath).split("/").includes("agent-workspace")
 }
 
-function extractedTextLabel(filePath: string): string {
-  switch (getFileExtension(filePath)) {
-    case "doc":
-      return "Word DOC (extracted text)"
-    case "docx":
-      return "Word DOCX (extracted text)"
-    case "pptx":
-      return "PowerPoint (extracted text)"
-    case "xls":
-    case "xlsx":
-      return "Spreadsheet (extracted text)"
-    case "odt":
-    case "ods":
-    case "odp":
-      return "OpenDocument (extracted text)"
-    default:
-      return "Extracted text"
-  }
-}
-
-function ImagePreview({ filePath, fileName }: { filePath: string; fileName: string }) {
-  const src = convertFileSrc(filePath)
+function ImagePreview({ projectId, filePath, fileName }: { projectId: string; filePath: string; fileName: string }) {
+  const src = webApi.previewUrl(projectId, filePath)
   return (
     <div className="flex h-full flex-col p-6">
       <div className="mb-4 text-xs text-muted-foreground">{filePath}</div>
@@ -131,8 +122,27 @@ function ImagePreview({ filePath, fileName }: { filePath: string; fileName: stri
   )
 }
 
-function VideoPreview({ filePath, fileName }: { filePath: string; fileName: string }) {
-  const src = convertFileSrc(filePath)
+function PdfPreview({ projectId, filePath, fileName }: { projectId: string; filePath: string; fileName: string }) {
+  const src = webApi.previewUrl(projectId, filePath)
+  return (
+    <div className="flex h-full flex-col p-4">
+      <div className="mb-3 text-xs text-muted-foreground">{filePath}</div>
+      <object
+        data={src}
+        type="application/pdf"
+        aria-label={fileName}
+        className="min-h-0 flex-1 rounded-lg border border-border bg-background"
+      >
+        <p className="p-4 text-sm text-muted-foreground">
+          This browser cannot render the PDF preview.
+        </p>
+      </object>
+    </div>
+  )
+}
+
+function VideoPreview({ projectId, filePath, fileName }: { projectId: string; filePath: string; fileName: string }) {
+  const src = webApi.previewUrl(projectId, filePath)
   return (
     <div className="flex h-full flex-col p-6">
       <div className="mb-4 text-xs text-muted-foreground">{filePath}</div>
@@ -149,8 +159,8 @@ function VideoPreview({ filePath, fileName }: { filePath: string; fileName: stri
   )
 }
 
-function AudioPreview({ filePath, fileName }: { filePath: string; fileName: string }) {
-  const src = convertFileSrc(filePath)
+function AudioPreview({ projectId, filePath, fileName }: { projectId: string; filePath: string; fileName: string }) {
+  const src = webApi.previewUrl(projectId, filePath)
   return (
     <div className="flex h-full flex-col items-center justify-center gap-4 p-6">
       <div className="text-xs text-muted-foreground">{filePath}</div>
@@ -189,7 +199,7 @@ function TextPreview({ filePath, content, label }: { filePath: string; content: 
   // so raw-source previews (e.g. skill-exported docs) actually show
   // their images instead of dumping the embed syntax as text.
   const renderBody = useMemo(() => transformImageEmbeds(body), [body])
-  // Directory of this file (project-absolute) so relative image
+  // Directory of this file (project-relative) so relative image
   // references (`../assets/x.png`) resolve against the file's own
   // location, Obsidian-style.
   const currentFileDir = useMemo(() => {

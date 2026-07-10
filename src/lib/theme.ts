@@ -1,6 +1,3 @@
-import { loadTheme } from "@/lib/project-store"
-import { getCurrentWindow, type Theme as NativeTheme } from "@tauri-apps/api/window"
-
 export type AppTheme = "light" | "dark" | "system"
 
 let activeTheme: AppTheme = "system"
@@ -9,22 +6,6 @@ let mediaListenerInstalled = false
 
 function systemPrefersDark(): boolean {
   return window.matchMedia("(prefers-color-scheme: dark)").matches
-}
-
-function isTauriRuntime(): boolean {
-  return "__TAURI_INTERNALS__" in window || "__TAURI__" in window
-}
-
-function syncNativeWindowTheme(resolved: NativeTheme): void {
-  if (!isTauriRuntime()) return
-  const win = getCurrentWindow()
-  const background = resolved === "dark" ? "#27282b" : "#ffffff"
-  void win.setTheme(resolved).catch((err) => {
-    console.warn("[theme] failed to sync native window theme:", err)
-  })
-  void win.setBackgroundColor(background).catch((err) => {
-    console.warn("[theme] failed to sync native window background:", err)
-  })
 }
 
 export function applyTheme(theme: AppTheme): void {
@@ -39,7 +20,6 @@ export function applyTheme(theme: AppTheme): void {
   root.classList.remove("light", "dark")
   root.classList.add(resolved)
   root.dataset.theme = theme
-  syncNativeWindowTheme(resolved)
 }
 
 export function watchSystemTheme(): void {
@@ -52,13 +32,9 @@ export function watchSystemTheme(): void {
 }
 
 export async function loadAndApplyTheme(): Promise<AppTheme> {
-  try {
-    const savedTheme = await loadTheme()
-    const theme = savedTheme ?? "system"
-    applyTheme(theme)
-    return theme
-  } catch {
-    applyTheme("system")
-    return "system"
-  }
+  // Server-backed UI preferences are intentionally deferred until an
+  // authenticated, allowlisted settings endpoint exists. Do not persist this
+  // in browser storage: the legacy Tauri store also contains provider secrets.
+  applyTheme("system")
+  return "system"
 }

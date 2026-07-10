@@ -8,7 +8,7 @@ import { WikiReader } from "@/components/editor/wiki-reader"
 interface WikiEditorProps {
   content: string
   onSave: (markdown: string, options?: { immediate?: boolean }) => void
-  /** Absolute path of the file, threaded to WikiReader so relative
+  /** Project-relative path of the file, threaded to WikiReader so relative
    *  image references resolve against the file's own directory. */
   filePath?: string
 }

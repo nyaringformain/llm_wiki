@@ -20,6 +20,7 @@
  *     the wiki summary). Callers fall back gracefully.
  */
 import { listDirectory } from "@/commands/fs"
+import { webApi, type WebFileNode } from "@/platform/web-api"
 import {
   sourceIdentityForPath,
   sourceSummarySlugCandidatesFromIdentity,
@@ -30,6 +31,7 @@ import { filterRawSourceTree } from "@/lib/source-filter"
 export async function findRawSourceForImage(
   imageUrl: string,
   projectPath: string,
+  projectId?: string,
 ): Promise<string | null> {
   // Image URLs reach us in TWO shapes:
   //   1. ABSOLUTE: `/Users/.../wiki/media/<slug>/img-N.png`
@@ -42,7 +44,14 @@ export async function findRawSourceForImage(
 
   let tree: FileNode[]
   try {
-    tree = filterRawSourceTree(await listDirectory(`${normalizedProjectPath}/raw/sources`, true))
+    tree = filterRawSourceTree(
+      projectId
+        ? (await webApi.tree(projectId, "raw/sources", {
+            includeHidden: true,
+            maxDepth: 30,
+          })).map(webNodeToFileNode)
+        : await listDirectory(`${normalizedProjectPath}/raw/sources`, true),
+    )
   } catch {
     return null
   }
@@ -68,6 +77,18 @@ export async function findRawSourceForImage(
   }
 
   return findByMediaSlug(tree)
+}
+
+function webNodeToFileNode(node: WebFileNode): FileNode {
+  return {
+    name: node.name,
+    path: node.path,
+    is_dir: node.isDir,
+    size: node.size,
+    modifiedAtMs: node.modifiedAtMs,
+    version: node.version,
+    children: node.children?.map(webNodeToFileNode),
+  }
 }
 
 /**

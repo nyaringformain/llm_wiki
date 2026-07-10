@@ -1,6 +1,4 @@
-import { invoke } from "@tauri-apps/api/core"
-import { normalizePath } from "@/lib/path-utils"
-import { useWikiStore } from "@/stores/wiki-store"
+import { webApi } from "@/platform/web-api"
 
 export interface ImageRef {
   url: string
@@ -20,9 +18,10 @@ export interface SearchResult {
 interface BackendSearchResponse {
   // Reserved for result badges/debug UI. The backend already returns these
   // signals so API and WebView search share the same retrieval contract.
-  mode: "keyword" | "vector" | "hybrid"
+  mode: "keyword" | "graph" | "vector" | "hybrid"
   results: SearchResult[]
   tokenHits: number
+  graphHits: number
   vectorHits: number
 }
 
@@ -59,24 +58,14 @@ export function tokenizeQuery(query: string): string[] {
 }
 
 export async function searchWiki(
-  projectPath: string,
+  projectId: string,
   query: string,
 ): Promise<SearchResult[]> {
   if (!query.trim()) return []
-  const pp = normalizePath(projectPath)
-  const embCfg = useWikiStore.getState().embeddingConfig
-
-  const response = await invoke<BackendSearchResponse>("search_project", {
-    projectPath: pp,
-    query,
+  const response: BackendSearchResponse = await webApi.search(projectId, query, {
     topK: 20,
     includeContent: false,
-    queryEmbedding: null,
-    embeddingConfig: embCfg,
+    expandGraph: true,
   })
-
-  return response.results.map((result) => ({
-    ...result,
-    path: `${pp}/${normalizePath(result.path).replace(/^\/+/, "")}`,
-  }))
+  return response.results
 }

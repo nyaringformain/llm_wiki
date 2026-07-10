@@ -5,6 +5,7 @@ use anyhow::Context;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{FromRow, SqlitePool};
 
+use crate::auth::SESSION_TTL_SECONDS;
 use crate::config::ServerPaths;
 
 #[derive(Clone)]
@@ -70,6 +71,181 @@ impl ConfigDb {
         Ok(SetupState {
             owner_configured: owner_count > 0,
         })
+    }
+
+    pub(crate) async fn create_owner(&self, password_hash: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO owner_auth (id, password_hash)
+            SELECT 1, ?
+            WHERE NOT EXISTS (SELECT 1 FROM owner_auth WHERE id = 1)
+            "#,
+        )
+        .bind(password_hash)
+        .execute(&self.pool)
+        .await
+        .context("failed to create owner authentication record")?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub(crate) async fn owner_password_hash(&self) -> anyhow::Result<Option<String>> {
+        sqlx::query_scalar("SELECT password_hash FROM owner_auth WHERE id = 1")
+            .fetch_optional(&self.pool)
+            .await
+            .context("failed to read owner password hash")
+    }
+
+    pub(crate) async fn rotate_owner_password(&self, password_hash: &str) -> anyhow::Result<bool> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("failed to start owner password rotation")?;
+        let result = sqlx::query(
+            r#"
+            UPDATE owner_auth
+            SET password_hash = ?,
+                password_updated_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1
+            "#,
+        )
+        .bind(password_hash)
+        .execute(&mut *transaction)
+        .await
+        .context("failed to rotate owner password")?;
+
+        if result.rows_affected() == 0 {
+            transaction
+                .rollback()
+                .await
+                .context("failed to roll back owner password rotation")?;
+            return Ok(false);
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE owner_sessions
+            SET revoked_at = CURRENT_TIMESTAMP
+            WHERE revoked_at IS NULL
+            "#,
+        )
+        .execute(&mut *transaction)
+        .await
+        .context("failed to revoke sessions during owner password rotation")?;
+
+        transaction
+            .commit()
+            .await
+            .context("failed to commit owner password rotation")?;
+        Ok(true)
+    }
+
+    pub(crate) async fn create_session(&self, token_hash: &str) -> anyhow::Result<SessionRecord> {
+        sqlx::query(
+            r#"
+            INSERT INTO owner_sessions (token_hash, expires_at)
+            VALUES (?, datetime(CURRENT_TIMESTAMP, ?))
+            "#,
+        )
+        .bind(token_hash)
+        .bind(format!("+{SESSION_TTL_SECONDS} seconds"))
+        .execute(&self.pool)
+        .await
+        .context("failed to create owner session")?;
+
+        let expires_at = sqlx::query_scalar(
+            r#"
+            SELECT strftime('%Y-%m-%dT%H:%M:%SZ', expires_at)
+            FROM owner_sessions
+            WHERE token_hash = ?
+            "#,
+        )
+        .bind(token_hash)
+        .fetch_one(&self.pool)
+        .await
+        .context("failed to read owner session expiry")?;
+
+        Ok(SessionRecord { expires_at })
+    }
+
+    pub(crate) async fn valid_session(
+        &self,
+        token_hash: &str,
+    ) -> anyhow::Result<Option<SessionRecord>> {
+        let result = sqlx::query(
+            r#"
+            UPDATE owner_sessions
+            SET last_seen_at = CURRENT_TIMESTAMP
+            WHERE token_hash = ?
+              AND revoked_at IS NULL
+              AND expires_at > CURRENT_TIMESTAMP
+            "#,
+        )
+        .bind(token_hash)
+        .execute(&self.pool)
+        .await
+        .context("failed to refresh owner session")?;
+
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+
+        let expires_at = sqlx::query_scalar(
+            r#"
+            SELECT strftime('%Y-%m-%dT%H:%M:%SZ', expires_at)
+            FROM owner_sessions
+            WHERE token_hash = ?
+              AND revoked_at IS NULL
+              AND expires_at > CURRENT_TIMESTAMP
+            "#,
+        )
+        .bind(token_hash)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to read owner session")?;
+
+        Ok(expires_at.map(|expires_at| SessionRecord { expires_at }))
+    }
+
+    pub(crate) async fn revoke_session(&self, token_hash: &str) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE owner_sessions
+            SET revoked_at = CURRENT_TIMESTAMP
+            WHERE token_hash = ?
+              AND revoked_at IS NULL
+            "#,
+        )
+        .bind(token_hash)
+        .execute(&self.pool)
+        .await
+        .context("failed to revoke owner session")?;
+
+        Ok(())
+    }
+
+    pub(crate) async fn record_login_failure(
+        &self,
+        remote_addr: Option<&str>,
+        user_agent: Option<&str>,
+        reason: &str,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO login_failures (remote_addr, user_agent, reason)
+            VALUES (?, ?, ?)
+            "#,
+        )
+        .bind(remote_addr)
+        .bind(user_agent)
+        .bind(reason)
+        .execute(&self.pool)
+        .await
+        .context("failed to record login failure")?;
+
+        Ok(())
     }
 
     pub async fn list_projects(&self) -> anyhow::Result<Vec<ProjectRecord>> {
@@ -176,6 +352,11 @@ impl SetupState {
     pub fn setup_required(&self) -> bool {
         !self.owner_configured
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionRecord {
+    pub expires_at: String,
 }
 
 #[cfg(unix)]

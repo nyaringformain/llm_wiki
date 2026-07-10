@@ -1,13 +1,13 @@
 import { useState, useCallback, useMemo, useEffect } from "react"
 import { Search, FileText, ImageIcon, X, ArrowUpRight } from "lucide-react"
 import { useWikiStore } from "@/stores/wiki-store"
-import { readFile } from "@/commands/fs"
 import { searchWiki, tokenizeQuery, type SearchResult, type ImageRef } from "@/lib/search"
 import { useTranslation } from "react-i18next"
 import { normalizePath } from "@/lib/path-utils"
 import { resolveMarkdownImageSrc } from "@/lib/markdown-image-resolver"
-import { findRawSourceForImage, imageUrlToAbsolute } from "@/lib/raw-source-resolver"
+import { findRawSourceForImage } from "@/lib/raw-source-resolver"
 import { isImeComposing } from "@/lib/keyboard-utils"
+import { webApi } from "@/platform/web-api"
 
 /**
  * One image hit displayed in the Images section.
@@ -29,7 +29,7 @@ export function SearchView() {
   const { t } = useTranslation()
   const project = useWikiStore((s) => s.project)
   const openFileInPreview = useWikiStore((s) => s.openFileInPreview)
-  const setPendingScrollImageSrc = useWikiStore((s) => s.setPendingScrollImageSrc)
+  const openPathInPreview = useWikiStore((s) => s.openPathInPreview)
 
   const [query, setQuery] = useState("")
   const [results, setResults] = useState<SearchResult[]>([])
@@ -50,7 +50,7 @@ export function SearchView() {
       setSearching(true)
       setHasSearched(true)
       try {
-        const found = await searchWiki(normalizePath(project.path), q)
+        const found = await searchWiki(project.id, q)
         setResults(found)
       } catch (err) {
         console.error("Search failed:", err)
@@ -114,9 +114,10 @@ export function SearchView() {
   const visibleImages = showSupportingImages ? imageHits : matchingImages
 
   async function handleOpen(path: string) {
+    if (!project) return
     try {
-      const content = await readFile(path)
-      openFileInPreview(path, content)
+      const response = await webApi.readText(project.id, path)
+      openFileInPreview(path, response.contents)
     } catch (err) {
       console.error("Failed to open search result:", err)
     }
@@ -151,17 +152,18 @@ export function SearchView() {
    * open the wiki page so SOMETHING happens.
    */
   async function handleJumpFromLightbox(hit: ImageHit) {
+    if (!project) return
     const projectPath = project?.path
     let openPath = hit.sourcePath
-    let scrollTarget = hit.url
 
     if (projectPath) {
       const pp = normalizePath(projectPath)
-      const rawPath = await findRawSourceForImage(hit.url, pp)
+      const rawPath = await findRawSourceForImage(hit.url, pp, project.id)
       if (rawPath) {
         console.log(`[search:jump] ${hit.url} → raw source ${rawPath}`)
-        openPath = rawPath
-        scrollTarget = imageUrlToAbsolute(scrollTarget, pp)
+        openPathInPreview(rawPath)
+        setLightbox(null)
+        return
       } else {
         console.warn(
           `[search:jump] no raw source found for image ${hit.url} — falling back to wiki page`,
@@ -170,9 +172,8 @@ export function SearchView() {
     }
 
     try {
-      const content = await readFile(openPath)
-      setPendingScrollImageSrc(scrollTarget)
-      openFileInPreview(openPath, content)
+      const response = await webApi.readText(project.id, openPath)
+      openFileInPreview(openPath, response.contents)
       setLightbox(null)
     } catch (err) {
       console.error("Failed to jump to source:", err)
